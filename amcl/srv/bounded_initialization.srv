@@ -1,0 +1,5 @@
+# ROS service message for a bounded initialization
+# float vector shall be in the form of x1, y1, x2, y2, ...
+float32[] bounds
+---
+bool resp

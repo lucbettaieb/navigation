@@ -49,6 +49,7 @@
 #include "nav_msgs/GetMap.h"
 #include "nav_msgs/SetMap.h"
 #include "std_srvs/Empty.h"
+#include "amcl/bounded_initialization.h"
 
 // For transform support
 #include "tf/transform_broadcaster.h"
@@ -140,12 +141,16 @@ class AmclNode
     // Pose-generating function used to uniformly distribute particles over
     // the map
     static pf_vector_t uniformPoseGenerator(void* arg);
+
+    static pf_vector_t boundedPoseGenerator(void* arg, std::vector<pf_vector_t> &bound_vec);
 #if NEW_UNIFORM_SAMPLING
     static std::vector<std::pair<int,int> > free_space_indices;
 #endif
     // Callbacks
     bool globalLocalizationCallback(std_srvs::Empty::Request& req,
                                     std_srvs::Empty::Response& res);
+    bool boundedInitializationCallback(amcl::bounded_initialization::Request& req,
+                                       amcl::bounded_initialization::Response& res);
     bool nomotionUpdateCallback(std_srvs::Empty::Request& req,
                                     std_srvs::Empty::Response& res);
     bool setMapCallback(nav_msgs::SetMap::Request& req,
@@ -234,6 +239,7 @@ class AmclNode
     ros::Publisher pose_pub_;
     ros::Publisher particlecloud_pub_;
     ros::ServiceServer global_loc_srv_;
+    ros::ServiceServer bounded_init_srv_;
     ros::ServiceServer nomotion_update_srv_; //to let amcl update samples without requiring motion
     ros::ServiceServer set_map_srv_;
     ros::Subscriber initial_pose_sub_old_;
@@ -423,6 +429,9 @@ AmclNode::AmclNode() :
   particlecloud_pub_ = nh_.advertise<geometry_msgs::PoseArray>("particlecloud", 2, true);
   global_loc_srv_ = nh_.advertiseService("global_localization", 
 					 &AmclNode::globalLocalizationCallback,
+                                         this);
+  bounded_init_srv_ = nh_.advertiseService("bounded_initialization",
+           &AmclNode::boundedInitializationCallback,
                                          this);
   nomotion_update_srv_= nh_.advertiseService("request_nomotion_update", &AmclNode::nomotionUpdateCallback, this);
   set_map_srv_= nh_.advertiseService("set_map", &AmclNode::setMapCallback, this);
@@ -999,6 +1008,12 @@ AmclNode::uniformPoseGenerator(void* arg)
   return p;
 }
 
+pf_vector_t
+AmclNode::boundedPoseGenerator(void* arg, std::vector<pf_vector_t> &bound_vec)
+{
+  
+}
+
 bool
 AmclNode::globalLocalizationCallback(std_srvs::Empty::Request& req,
                                      std_srvs::Empty::Response& res)
@@ -1011,6 +1026,32 @@ AmclNode::globalLocalizationCallback(std_srvs::Empty::Request& req,
   pf_init_model(pf_, (pf_init_model_fn_t)AmclNode::uniformPoseGenerator,
                 (void *)map_);
   ROS_INFO("Global initialisation done!");
+  pf_init_ = false;
+  return true;
+}
+
+bool
+AmclNode::boundedInitializationCallback(amcl::bounded_initialization::Request& req,
+                                        amcl::bounded_initialization::Response& res)
+{
+  boost::recursive_mutex::scoped_lock gl(configuration_mutex_);
+  
+  std::vector<pf_vector_t> bound_vec;
+  for (uint i = 0; i < req.bounds.size(); i += 2)
+  {
+    pf_vector_t p;
+
+    p.x = req.bounds[i];
+    p.y = req.bounds[i+1];
+    bound_vec.push_back(p);
+  }
+
+  ROS_INFO("Initializing with a uniform distribution over a defined area");
+
+  pf_init_model(pf_, (pf_init_model_fn_t)AmclNode::boundedPoseGenerator,
+                (void *)map_,);
+
+  ROS_INFO("Bounded initialization done!");
   pf_init_ = false;
   return true;
 }

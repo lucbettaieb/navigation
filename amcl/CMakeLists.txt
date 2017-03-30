@@ -8,9 +8,20 @@ find_package(catkin REQUIRED
             tf
             dynamic_reconfigure
             nav_msgs
+            std_msgs
+            message_generation
+            genmsg
         )
 
 find_package(Boost REQUIRED)
+
+# add service files
+add_service_files(DIRECTORY srv
+                  FILES bounded_initialization.srv)
+
+generate_messages(
+  DEPENDENCIES
+  std_msgs)
 
 # dynamic reconfigure
 generate_dynamic_reconfigure_options(
@@ -23,6 +34,8 @@ catkin_package(
         roscpp
         dynamic_reconfigure
         tf
+        message_runtime
+        std_msgs
   INCLUDE_DIRS include
   LIBRARIES amcl_sensors amcl_map amcl_pf
 )
