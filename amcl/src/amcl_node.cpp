@@ -24,9 +24,14 @@
 #include <vector>
 #include <map>
 #include <cmath>
+#include <tuple>
 
 #include <boost/bind.hpp>
 #include <boost/thread/mutex.hpp>
+
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/geometries/polygon.hpp>
 
 // Signal handling
 #include <signal.h>
@@ -49,6 +54,7 @@
 #include "nav_msgs/GetMap.h"
 #include "nav_msgs/SetMap.h"
 #include "std_srvs/Empty.h"
+#include "visualization_msgs/MarkerArray.h"
 
 // For transform support
 #include "tf/transform_broadcaster.h"
@@ -105,6 +111,52 @@ angle_diff(double a, double b)
     return(d2);
 }
 
+typedef boost::geometry::model::d2::point_xy<double> point_type;
+typedef boost::geometry::model::polygon<point_type> polygon_type;
+
+std::tuple<float, float> generatePoint(std::vector<float> verts)
+{
+  std::vector<std::tuple<float, float>> verts_vec;
+  
+  std::tuple<float, float> out_point;
+  std::get<0>(out_point) = 0.0;
+  std::get<1>(out_point) = 0.0;
+
+  float x_max, x_min;
+  float y_max, y_min;
+
+  x_max = -1;
+  y_max = -1;
+  x_min = 9999999;
+  y_min = 9999999;
+
+  for (uint  i = 0; i < verts.size(); i += 2)
+  {
+    if (verts[i] > x_max)
+    {
+      x_max = verts[i];
+    }
+    if (verts[i] < x_min)
+    {
+      x_min = verts[i];
+    }
+    if (verts[i] > y_max)
+    {
+      y_max = verts[i+1];
+    }
+    if (verts[i] < y_min)
+    {
+      y_min = verts[i+1];
+    }
+  }
+
+  std::get<0>(out_point) = (((float(rand()) / float(RAND_MAX)) * (x_max - x_min)) + x_min);
+  std::get<1>(out_point) = (((float(rand()) / float(RAND_MAX)) * (y_max - y_min)) + y_min);
+
+  return out_point;
+}
+
+
 static const std::string scan_topic_ = "scan";
 
 class AmclNode
@@ -121,6 +173,7 @@ class AmclNode
     int process();
     void savePoseToServer();
 
+    ros::Publisher area_index_pub_;
   private:
     tf::TransformBroadcaster* tfb_;
 
@@ -140,12 +193,28 @@ class AmclNode
     // Pose-generating function used to uniformly distribute particles over
     // the map
     static pf_vector_t uniformPoseGenerator(void* arg);
+
+    static pf_vector_t machineshopPoseGenerator(void* arg);
+    static pf_vector_t serverroomPoseGenerator(void* arg);
+    static pf_vector_t officePoseGenerator(void* arg);
+    static pf_vector_t labPoseGenerator(void* arg);
 #if NEW_UNIFORM_SAMPLING
     static std::vector<std::pair<int,int> > free_space_indices;
 #endif
     // Callbacks
     bool globalLocalizationCallback(std_srvs::Empty::Request& req,
                                     std_srvs::Empty::Response& res);
+
+    // Specific CB's for initializing in rooms
+    bool machineshopCB(std_srvs::Empty::Request& req,
+                       std_srvs::Empty::Response& res);
+    bool serverroomCB(std_srvs::Empty::Request& req,
+                      std_srvs::Empty::Response& res);
+    bool labCB(std_srvs::Empty::Request& req,
+               std_srvs::Empty::Response& res);
+    bool officeCB(std_srvs::Empty::Request& req,
+                  std_srvs::Empty::Response& res);
+
     bool nomotionUpdateCallback(std_srvs::Empty::Request& req,
                                     std_srvs::Empty::Response& res);
     bool setMapCallback(nav_msgs::SetMap::Request& req,
@@ -233,7 +302,17 @@ class AmclNode
     ros::NodeHandle private_nh_;
     ros::Publisher pose_pub_;
     ros::Publisher particlecloud_pub_;
+    
+    
     ros::ServiceServer global_loc_srv_;
+
+
+    // Room specific services
+    ros::ServiceServer machineshop_loc_srv_;
+    ros::ServiceServer serverroom_loc_srv_;
+    ros::ServiceServer office_loc_srv_;
+    ros::ServiceServer lab_loc_srv_;
+
     ros::ServiceServer nomotion_update_srv_; //to let amcl update samples without requiring motion
     ros::ServiceServer set_map_srv_;
     ros::Subscriber initial_pose_sub_old_;
@@ -268,6 +347,7 @@ class AmclNode
     ros::Duration laser_check_interval_;
     void checkLaserReceived(const ros::TimerEvent& event);
 };
+
 
 std::vector<std::pair<int,int> > AmclNode::free_space_indices;
 
@@ -424,6 +504,17 @@ AmclNode::AmclNode() :
   global_loc_srv_ = nh_.advertiseService("global_localization", 
 					 &AmclNode::globalLocalizationCallback,
                                          this);
+  area_index_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("area_indicies", 2, true);
+  // Room specific localization
+  machineshop_loc_srv_ = nh_.advertiseService("machineshop_initialization", 
+                                              &AmclNode::machineshopCB, this);
+  serverroom_loc_srv_ = nh_.advertiseService("serverroom_initialization", 
+                                             &AmclNode::serverroomCB, this);
+  office_loc_srv_ = nh_.advertiseService("office_initialization", 
+                                        &AmclNode::officeCB, this);
+  lab_loc_srv_ = nh_.advertiseService("lab_initialization", 
+                                      &AmclNode::labCB, this);
+
   nomotion_update_srv_= nh_.advertiseService("request_nomotion_update", &AmclNode::nomotionUpdateCallback, this);
   set_map_srv_= nh_.advertiseService("set_map", &AmclNode::setMapCallback, this);
 
@@ -960,7 +1051,6 @@ AmclNode::getOdomPose(tf::Stamped<tf::Pose>& odom_pose,
   return true;
 }
 
-
 pf_vector_t
 AmclNode::uniformPoseGenerator(void* arg)
 {
@@ -999,6 +1089,163 @@ AmclNode::uniformPoseGenerator(void* arg)
   return p;
 }
 
+pf_vector_t
+AmclNode::machineshopPoseGenerator(void* arg)
+{
+map_t* map = (map_t*)arg;
+
+  pf_vector_t p;
+  
+  std::vector<float> machineshop_poly = {20.234, 5.457, 15.57, 5.89, 15.477, 0.608, 20.228, 0.289};
+
+  polygon_type poly;
+  boost::geometry::read_wkt(
+      "POLYGON((20.234 5.457, 15.57 5.89, 15.477 0.608, 20.228 0.289))", poly);
+  for(;;)
+  {
+    std::tuple<float, float> pxy;
+    pxy = generatePoint(machineshop_poly);
+    p.v[0] = std::get<0>(pxy);
+    p.v[1] = std::get<1>(pxy);
+    p.v[2] = drand48() * 2 * M_PI - M_PI;
+    // Check that it's a free cell
+    int i,j;
+
+
+    // if a ray crossing the polygon crosses an even amount of times then its outside and should be discarded
+   
+    i = MAP_GXWX(map, p.v[0]);
+    j = MAP_GYWY(map, p.v[1]);
+
+    point_type point(p.v[0], p.v[1]);
+
+    if (!boost::geometry::within(point, poly) && MAP_VALID(map,i,j) && (map->cells[MAP_INDEX(map,i,j)].occ_state == -1))
+    {
+      break;
+    }
+  }
+  return p;
+}
+
+pf_vector_t
+AmclNode::serverroomPoseGenerator(void* arg)
+{
+map_t* map = (map_t*)arg;
+
+  pf_vector_t p;
+  
+  std::vector<float> serverroom_poly_convex = {20.077, 12.875, 20.229, 19.674, 15.256, 18.938, 15.574, 13.118};
+
+  polygon_type poly;
+  boost::geometry::read_wkt(
+      "POLYGON((20.058 12.893, 20.108 19.647, 15.76 19.38, 16.06 15.23, 14.79 15.07, 14.95 13.97, 15.65 13.93, 15.64 12.90))", poly);
+
+  for(;;)
+  {
+    std::tuple<float, float> pxy;
+    pxy = generatePoint(serverroom_poly_convex);
+
+    p.v[0] = std::get<0>(pxy);
+    p.v[1] = std::get<1>(pxy);
+    p.v[2] = drand48() * 2 * M_PI - M_PI;
+    // Check that it's a free cell
+    int i,j;
+
+    // if a ray crossing the polygon crosses an even amount of times then its outside and should be discarded
+   
+    i = MAP_GXWX(map, p.v[0]);
+    j = MAP_GYWY(map, p.v[1]);
+
+    point_type point(p.v[0], p.v[1]);
+
+    if (boost::geometry::within(point, poly) && MAP_VALID(map,i,j) && (map->cells[MAP_INDEX(map,i,j)].occ_state == -1))
+    {
+      break;
+    }
+  }
+  return p;
+}
+
+pf_vector_t
+AmclNode::officePoseGenerator(void* arg)
+{
+  map_t* map = (map_t*)arg;
+
+  pf_vector_t p;
+  
+  std::vector<float> office_poly = {13.06, 0.41, 13.00, 9.275, 8.76, 9.11, 8.64, 3.49, 7.34, 3.30, 7.06, 9.46, 5.218, 9.375, 5.328, 2.618, 1.155, 2.99, 0.867, 0.616};
+  std::vector<float> office_poly_convex = {13.06, 0.41, 13.00, 9.275, 0.867, 0.616, 0.887, 8.808};
+
+  polygon_type poly;
+  boost::geometry::read_wkt(
+      "POLYGON((13.06 0.41, 13.00 9.275, 8.76 9.11, 8.64 3.49, 7.34 3.30, 7.06 9.46, 5.218 9.375, 5.328 2.618, 1.155 2.99, 0.867 0.616))", poly);
+
+  for(;;)
+  {
+    std::tuple<float, float> pxy;
+    pxy = generatePoint(office_poly_convex);
+
+    p.v[0] = std::get<0>(pxy);
+    p.v[1] = std::get<1>(pxy);
+    p.v[2] = drand48() * 2 * M_PI - M_PI;
+    // Check that it's a free cell
+    int i,j;
+
+
+    // if a ray crossing the polygon crosses an even amount of times then its outside and should be discarded
+   
+    i = MAP_GXWX(map, p.v[0]);
+    j = MAP_GYWY(map, p.v[1]);
+
+    point_type point(p.v[0], p.v[1]);
+
+    if (boost::geometry::within(point, poly) && MAP_VALID(map,i,j) && (map->cells[MAP_INDEX(map,i,j)].occ_state == -1))
+    {
+      break;
+    }
+  }
+  return p;
+}
+
+pf_vector_t
+AmclNode::labPoseGenerator(void* arg)
+{
+map_t* map = (map_t*)arg;
+
+  pf_vector_t p;
+  
+  std::vector<float> lab_poly_convex = {14.922, 19.738, 0.301, 19.485, 0.684, 0.427, 15.626, 0.492};
+  polygon_type poly;
+  boost::geometry::read_wkt(
+      "POLYGON((14.922 19.648, 0.193 19.106, 0.746 9.389, 13.190 9.422, 13.431 0.540, 15.361 0.477))", poly);
+
+  for(;;)
+  {
+    std::tuple<float, float> pxy;
+    pxy = generatePoint(lab_poly_convex);
+
+    p.v[0] = std::get<0>(pxy);
+    p.v[1] = std::get<1>(pxy);
+    p.v[2] = drand48() * 2 * M_PI - M_PI;
+    // Check that it's a free cell
+    int i,j;
+
+
+    // if a ray crossing the polygon crosses an even amount of times then its outside and should be discarded
+   
+    i = MAP_GXWX(map, p.v[0]);
+    j = MAP_GYWY(map, p.v[1]);
+
+    point_type point(p.v[0], p.v[1]);
+
+    if (!boost::geometry::within(point, poly) && MAP_VALID(map,i,j) && (map->cells[MAP_INDEX(map,i,j)].occ_state == -1))
+    {
+      break;
+    }
+  }
+  return p;
+}
+
 bool
 AmclNode::globalLocalizationCallback(std_srvs::Empty::Request& req,
                                      std_srvs::Empty::Response& res)
@@ -1011,6 +1258,70 @@ AmclNode::globalLocalizationCallback(std_srvs::Empty::Request& req,
   pf_init_model(pf_, (pf_init_model_fn_t)AmclNode::uniformPoseGenerator,
                 (void *)map_);
   ROS_INFO("Global initialisation done!");
+  pf_init_ = false;
+  return true;
+}
+
+bool
+AmclNode::machineshopCB(std_srvs::Empty::Request& req,
+                        std_srvs::Empty::Response& res)
+{
+  if( map_ == NULL ) {
+    return true;
+  }
+  boost::recursive_mutex::scoped_lock gl(configuration_mutex_);
+  ROS_INFO("Initializing with machineshop distribution");
+  pf_init_model(pf_, (pf_init_model_fn_t)AmclNode::machineshopPoseGenerator,
+                (void *)map_);
+  ROS_INFO("machineshop initialisation done!");
+  pf_init_ = false;
+  return true;
+}
+
+bool
+AmclNode::serverroomCB(std_srvs::Empty::Request& req,
+                       std_srvs::Empty::Response& res)
+{
+  if( map_ == NULL ) {
+    return true;
+  }
+  boost::recursive_mutex::scoped_lock gl(configuration_mutex_);
+  ROS_INFO("Initializing with serverroom distribution");
+  pf_init_model(pf_, (pf_init_model_fn_t)AmclNode::serverroomPoseGenerator,
+                (void *)map_);
+  ROS_INFO("serverroom initialisation done!");
+  pf_init_ = false;
+  return true;
+}
+
+bool
+AmclNode::officeCB(std_srvs::Empty::Request& req,
+                   std_srvs::Empty::Response& res)
+{
+  if( map_ == NULL ) {
+    return true;
+  }
+  boost::recursive_mutex::scoped_lock gl(configuration_mutex_);
+  ROS_INFO("Initializing with office distribution");
+  pf_init_model(pf_, (pf_init_model_fn_t)AmclNode::officePoseGenerator,
+                (void *)map_);
+  ROS_INFO("office initialisation done!");
+  pf_init_ = false;
+  return true;
+}
+
+bool
+AmclNode::labCB(std_srvs::Empty::Request& req,
+                std_srvs::Empty::Response& res)
+{
+  if( map_ == NULL ) {
+    return true;
+  }
+  boost::recursive_mutex::scoped_lock gl(configuration_mutex_);
+  ROS_INFO("Initializing with lab distribution");
+  pf_init_model(pf_, (pf_init_model_fn_t)AmclNode::labPoseGenerator,
+                (void *)map_);
+  ROS_INFO("lab initialisation done!");
   pf_init_ = false;
   return true;
 }
